@@ -1,0 +1,112 @@
+// EmailService.js
+const crypto = require('crypto');
+
+class MockEmailProvider1 {
+  async send(email) {
+    console.log('MockEmailProvider1: Sending email...');
+    if (Math.random() > 0.7) {
+      throw new Error('MockEmailProvider1: Failed to send email');
+    }
+    console.log('MockEmailProvider1: Email sent');
+  }
+}
+
+class MockEmailProvider2 {
+  async send(email) {
+    console.log('MockEmailProvider2: Sending email...');
+    if (Math.random() > 0.7) {
+      throw new Error('MockEmailProvider2: Failed to send email');
+    }
+    console.log('MockEmailProvider2: Email sent');
+  }
+}
+
+class EmailService {
+  constructor(providers, retryCount = 3, retryDelay = 1000, rateLimit = 5) {
+    this.providers = providers;
+    this.retryCount = retryCount;
+    this.retryDelay = retryDelay;
+    this.rateLimit = rateLimit;
+    this.idempotencyMap = new Map();
+    this.rateLimitMap = new Map();
+    this.circuitBreakerThreshold = 3;
+    this.failureCount = 0;
+  }
+
+  delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  generateIdempotencyKey(email) {
+    return crypto.createHash('md5').update(email.to + email.subject + email.body).digest('hex');
+  }
+
+  canSend(email) {
+    const timestamp = this.rateLimitMap.get(email.to) || 0;
+    return (Date.now() - timestamp) >= (60000 / this.rateLimit);
+  }
+
+  trackSend(email) {
+    this.rateLimitMap.set(email.to, Date.now());
+  }
+
+  circuitBreaker() {
+    if (this.failureCount >= this.circuitBreakerThreshold) {
+      throw new Error('Circuit breaker: Service temporarily unavailable');
+    }
+  }
+
+  async send(email) {
+    const idempotencyKey = this.generateIdempotencyKey(email);
+
+    if (this.idempotencyMap.get(idempotencyKey)) {
+      console.log('Duplicate send attempt detected, skipping...');
+      return;
+    }
+
+    if (!this.canSend(email)) {
+      console.log('Rate limit exceeded, try again later...');
+      return;
+    }
+
+    for (let attempt = 0; attempt < this.retryCount; attempt++) {
+      for (const provider of this.providers) {
+        try {
+          this.circuitBreaker();
+          await provider.send(email);
+          this.idempotencyMap.set(idempotencyKey, true);
+          this.trackSend(email);
+          return;
+        } catch (error) {
+          console.log(`Attempt ${attempt + 1} failed with provider ${provider.constructor.name}: ${error.message}`);
+          this.failureCount++;
+          if (attempt < this.retryCount - 1) {
+            await this.delay(this.retryDelay * Math.pow(2, attempt));
+          }
+        }
+      }
+    }
+    throw new Error('All attempts to send the email failed.');
+  }
+}
+
+// Tests and usage
+(async () => {
+  const provider1 = new MockEmailProvider1();
+  const provider2 = new MockEmailProvider2();
+  const emailService = new EmailService([provider1, provider2]);
+
+  const email = {
+    id: '1',
+    to: 'user@example.com',
+    subject: 'Hello',
+    body: 'This is a test email'
+  };
+
+  try {
+    await emailService.send(email);
+    console.log('Email sent successfully!');
+  } catch (error) {
+    console.log('Failed to send email:', error.message);
+  }
+})();
